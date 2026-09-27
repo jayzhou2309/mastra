@@ -115,6 +115,7 @@ function addSqliteMetadataValuePredicate(
 export class MemoryLibSQL extends MemoryStorage {
   override readonly supportsPartialThreadUpdate = true;
   readonly supportsObservationalMemory = true;
+  readonly supportsObservationalMemoryHistorySearch = true;
 
   /**
    * Retention-eligible tables. `threads`, `messages`, and `resources` all anchor
@@ -1737,8 +1738,25 @@ export class MemoryLibSQL extends MemoryStorage {
         args.push(options.to.toISOString());
       }
 
+      if (options?.groupId !== undefined) {
+        conditions.push(`(instr("activeObservations", ?) > 0 OR EXISTS (
+          SELECT 1 FROM json_each("bufferedObservationChunks") AS chunk
+          WHERE instr(json_extract(chunk.value, '$.observations'), ?) > 0
+        ))`);
+        const prefix = `<observation-group id="${options.groupId}"`;
+        args.push(prefix, prefix);
+      }
+      if (options?.beforeGeneration !== undefined) {
+        conditions.push(`"generationCount" < ?`);
+        args.push(options.beforeGeneration);
+      }
+      if (options?.afterGeneration !== undefined) {
+        conditions.push(`"generationCount" > ?`);
+        args.push(options.afterGeneration);
+      }
+      const direction = options?.sortDirection === 'ASC' ? 'ASC' : 'DESC';
       args.push(limit);
-      let sql = `SELECT * FROM "${OM_TABLE}" WHERE ${conditions.join(' AND ')} ORDER BY "generationCount" DESC LIMIT ?`;
+      let sql = `SELECT * FROM "${OM_TABLE}" WHERE ${conditions.join(' AND ')} ORDER BY "generationCount" ${direction}, "createdAt" ASC, id ASC LIMIT ?`;
 
       if (options?.offset != null) {
         args.push(options.offset);

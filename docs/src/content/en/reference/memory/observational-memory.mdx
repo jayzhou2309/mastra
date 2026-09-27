@@ -1176,7 +1176,39 @@ The standalone `ObservationalMemory` class accepts all the same options as the `
 
 When `retrieval` is truthy, Mastra registers a `recall` tool that pages through raw messages behind observation group ranges. With the default resource scope, the tool can list threads (`mode: "threads"`) and browse another thread through `threadId`. It also supports cross-thread search. Set `retrieval: { vector: true }` for semantic search (`mode: "search"`), or use `scope: 'thread'` to restrict the tool to the current thread. The tool is automatically added to the agent.
 
-Mastra also injects scope-aware usage instructions into the agent's context. For resource scope with `vector: true`, these cover routing between `search`, `threads`, and `messages`, including fallback to thread discovery when search results are unsuitable. Without `vector: true`, the instructions only cover `threads` and `messages` browsing, so the agent isn't steered toward a search mode that isn't configured. Resource-scoped instructions are injected even before any observation group exists, so the agent can browse other threads from the first message. Use `retrieval: { instructions: '...' }` to append application-specific guidance after the built-in instructions.
+When retrieval is enabled, the OM processor injects scope-aware system instructions on every model step, including read-only runs and threads without observations. The instructions explain when to verify historical details, how to search and page original observations, and when to read raw messages. Search and observation paging are described only when their configured capabilities support them. Resource scope also covers thread discovery. Historical decision questions start with recall when the original evidence isn't already visible; current code can verify today's behavior but doesn't necessarily establish the earlier rationale. The instructions frame observations and messages as two views of the same history: broaden with observations, then use a group's `_range` to drill into source messages. Use `retrieval: { instructions: '...' }` to append application-specific guidance after the built-in instructions.
+
+Reflected groups appear in the actor's context with `_kind: reflection_`. The instructions identify these as lossy summaries: use them for broad understanding, but don't treat missing details as evidence that an event never happened. They guide the agent to check original evidence with recall, page around relevant hits, and retry with the user's message verbatim when a focused search finds nothing useful.
+
+### Observation pages
+
+With vector search configured, `mode: "observations"` reads original observation groups around a search hit. Copy its `groupId` and, in resource scope, its `threadId`:
+
+```json
+{
+  "mode": "observations",
+  "threadId": "source-thread-id",
+  "groupId": "group-id-from-search",
+  "direction": "after",
+  "limit": 5
+}
+```
+
+Use `direction: "before"` to page backward. Omit `direction` to read the full anchor group and the following groups, including text truncated in a search result. Resolved pages return `{ results, count, hasMore }`. `hasMore` indicates whether more groups exist in the requested direction, or after the page when direction is omitted. Even a full page can return `hasMore: false`, so no empty follow-up call is needed. Unresolved anchors return an explanation without `hasMore`; they don't establish that history is exhausted.
+
+Each page identifies its thread and anchor, includes raw message ranges, and provides continuation calls or explicit start/end markers. These boundaries apply to retained original observation groups, not raw message availability. Reflections are excluded. Paging reads earlier generations when needed to recover original groups and deduplicates groups carried across generations.
+
+Search selects hits by similarity, then displays them by observation date. It divides a 2,000-token observation-text allowance across the selected hits and gives unused space to higher-ranked hits first. Every selected hit remains visible, with shortened excerpts marked individually. Headers, dates, IDs, gap markers, and paging guidance sit outside that allowance, so the full response can exceed 2,000 tokens. Use observation paging to expand a shortened excerpt rather than repeating the search.
+
+In supported agent loops, search checks the current message list when the tool executes. Hits become compact group and thread references when the same excerpt is already present in a previous recall search result, or when all retained source messages in the group's range remain present with their content intact. Longer or different excerpts remain available. The freed text allowance goes to other hits. Missing messages or trimmed parts prevent source-range suppression.
+
+These checks don't use a persistent seen-results cache. If earlier results or source messages leave the message list, a later search can show the excerpt again. Without access to the current message list, search returns normal excerpts. Request-stage transforms that only change the provider prompt aren't reflected in this check. Observation paging always returns the requested groups without this suppression.
+
+Relative dates use the record's time zone. Gap markers show exact counts within one generation and lower bounds such as `10+` across generations.
+
+Paging includes persisted buffered observations that search has indexed, even before they become active. Reading a page does not activate or modify the buffer.
+
+Existing retained records with observation-group tags work without re-indexing. Upgrade the storage adapter along with `@mastra/memory`; adapters must support group filtering and generation ordering in observation history. Missing tags or deleted generations cannot be recovered by paging. Text lookup scans stored observation text, so latency depends on the size of the retained history.
 
 ### Parameters
 
@@ -1184,11 +1216,25 @@ Mastra also injects scope-aware usage instructions into the agent's context. For
   content={[
   {
     name: 'mode',
-    type: "'messages' | 'threads' | 'search'",
+    type: "'messages' | 'threads' | 'search' | 'observations'",
     isOptional: true,
     defaultValue: "'messages'",
     description:
-      'What to retrieve. `"messages"` (default) pages through message history. `"threads"` lists all threads for the current user. `"search"` finds messages by semantic similarity across all threads (requires vector store and embedder).',
+      'What to retrieve. `"messages"` (default) pages through message history. `"threads"` lists threads for the current user. `"search"` finds messages by semantic similarity (requires vector store and embedder). `"observations"` pages original observation groups around a search hit.',
+  },
+  {
+    name: 'groupId',
+    type: 'string',
+    isOptional: true,
+    description:
+      'Required for observations mode. Copy the observation group ID from a search result or observation page.',
+  },
+  {
+    name: 'direction',
+    type: "'before' | 'after'",
+    isOptional: true,
+    description:
+      'For observations mode: return groups strictly before or after the anchor group. Omit to include the anchor and following groups.',
   },
   {
     name: 'query',
@@ -1232,7 +1278,7 @@ Mastra also injects scope-aware usage instructions into the agent's context. For
     type: 'number',
     isOptional: true,
     defaultValue: '20',
-    description: 'Maximum number of items to return per page.',
+    description: 'Maximum number of items to return per page, up to 20. Observations mode defaults to 5 groups.',
   },
   {
     name: 'detail',
@@ -1275,14 +1321,14 @@ Mastra also injects scope-aware usage instructions into the agent's context. For
     type: 'string',
     isOptional: true,
     description:
-      'For `mode: "threads"` only. Filter to threads created before this date. Accepts ISO 8601 format (e.g. `"2026-03-15"`, `"2026-03-10T00:00:00Z"`).',
+      'Filter to threads created before this date in threads mode, or observations dated before it in search mode. Accepts ISO 8601 format (e.g. `"2026-03-15"`, `"2026-03-10T00:00:00Z"`).',
   },
   {
     name: 'after',
     type: 'string',
     isOptional: true,
     description:
-      'For `mode: "threads"` only. Filter to threads created after this date. Accepts ISO 8601 format (e.g. `"2026-03-01"`, `"2026-03-10T00:00:00Z"`).',
+      'Filter to threads created after this date in threads mode, or observations dated after it in search mode. Accepts ISO 8601 format (e.g. `"2026-03-01"`, `"2026-03-10T00:00:00Z"`).',
   },
 ]}
 />

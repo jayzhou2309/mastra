@@ -59,6 +59,7 @@ import { formatDateForMongoDB } from '../utils';
 export class MemoryStorageMongoDB extends MemoryStorage {
   override readonly supportsPartialThreadUpdate = true;
   readonly supportsObservationalMemory = true;
+  readonly supportsObservationalMemoryHistorySearch = true;
 
   #connector: MongoDBConnector;
   #skipDefaultIndexes?: boolean;
@@ -1556,7 +1557,34 @@ export class MemoryStorageMongoDB extends MemoryStorage {
         filter['createdAt'] = createdAtFilter;
       }
 
-      let cursor = collection.find(filter).sort({ generationCount: -1 });
+      if (options?.groupId !== undefined) {
+        const prefix = { $literal: `<observation-group id="${options.groupId}"` };
+        filter['$expr'] = {
+          $or: [
+            { $gte: [{ $indexOfCP: [{ $ifNull: ['$activeObservations', ''] }, prefix] }, 0] },
+            {
+              $anyElementTrue: [
+                {
+                  $map: {
+                    input: { $ifNull: ['$bufferedObservationChunks', []] },
+                    as: 'chunk',
+                    in: { $gte: [{ $indexOfCP: [{ $ifNull: ['$$chunk.observations', ''] }, prefix] }, 0] },
+                  },
+                },
+              ],
+            },
+          ],
+        };
+      }
+      if (options?.beforeGeneration !== undefined || options?.afterGeneration !== undefined) {
+        filter['generationCount'] = {
+          ...(options.beforeGeneration !== undefined ? { $lt: options.beforeGeneration } : {}),
+          ...(options.afterGeneration !== undefined ? { $gt: options.afterGeneration } : {}),
+        };
+      }
+      let cursor = collection
+        .find(filter)
+        .sort({ generationCount: options?.sortDirection === 'ASC' ? 1 : -1, createdAt: 1, id: 1 });
       if (options?.offset != null) {
         cursor = cursor.skip(options.offset);
       }

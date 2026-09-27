@@ -5040,7 +5040,7 @@ describe('ObservationalMemory Integration', () => {
       // Fallback guidance: irrelevant search results should lead to thread discovery
       expect(instructions).toContain('If search results look irrelevant, do not give up');
       // Threads without observations may still hold the answer in raw history
-      expect(instructions).toContain('raw history may exist for threads that have no observations yet');
+      expect(instructions).toContain('Raw history may exist for threads that have no observations yet');
     });
 
     it('omits search routing for browsing-only resource retrieval', () => {
@@ -5131,13 +5131,14 @@ describe('ObservationalMemory Integration', () => {
       expect(text).toContain('Avoid historical tool calls.');
     });
 
-    it('returns undefined without observations for thread-scoped retrieval', async () => {
+    it('returns recall guidance without observations for thread-scoped retrieval', async () => {
       const retrievalOm = makeRetrievalOm({ scope: 'thread' });
       const record = await (retrievalOm as any).getOrCreateRecord(threadId, resourceId);
 
       const messages = await retrievalOm.buildContextSystemMessages({ threadId, resourceId, record });
 
-      expect(messages).toBeUndefined();
+      expect(messages!.join('\n')).toContain('limited to the current conversation thread');
+      expect(messages!.join('\n')).toContain('mode: "messages"');
     });
 
     it('returns undefined without observations when retrieval is disabled', async () => {

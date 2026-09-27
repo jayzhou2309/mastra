@@ -220,7 +220,7 @@ export async function handleObservationalMemoryOperation(
         .query(convexTable)
         .withIndex('by_lookup_key', (q: any) => q.eq('lookupKey', request.lookupKey))
         .order('desc')
-        .take(OM_QUERY_MAX_DOCS);
+        .collect();
 
       // createdAt is a UTC ISO string, so lexicographic comparison is chronological.
       if (request.from) {
@@ -229,6 +229,27 @@ export async function handleObservationalMemoryOperation(
       if (request.to) {
         docs = docs.filter((doc: any) => typeof doc.createdAt === 'string' && doc.createdAt <= request.to!);
       }
+      if (request.groupId !== undefined) {
+        const prefix = `<observation-group id="${request.groupId}"`;
+        docs = docs.filter(
+          (doc: any) =>
+            (typeof doc.activeObservations === 'string' && doc.activeObservations.includes(prefix)) ||
+            parseStoredChunks(doc.bufferedObservationChunks).some(chunk => chunk.observations.includes(prefix)),
+        );
+      }
+      if (request.beforeGeneration !== undefined) {
+        docs = docs.filter((doc: any) => doc.generationCount < request.beforeGeneration!);
+      }
+      if (request.afterGeneration !== undefined) {
+        docs = docs.filter((doc: any) => doc.generationCount > request.afterGeneration!);
+      }
+      const direction = request.sortDirection === 'ASC' ? 1 : -1;
+      docs.sort(
+        (a: any, b: any) =>
+          direction * (a.generationCount - b.generationCount) ||
+          a.createdAt.localeCompare(b.createdAt) ||
+          a.id.localeCompare(b.id),
+      );
       if (request.offset != null) {
         docs = docs.slice(request.offset);
       }

@@ -174,6 +174,7 @@ function dedupeMessagesForSave(messages: MastraDBMessage[]): MastraDBMessage[] {
 export class MemoryPG extends MemoryStorage {
   override readonly supportsPartialThreadUpdate = true;
   readonly supportsObservationalMemory = true;
+  readonly supportsObservationalMemoryHistorySearch = true;
 
   /**
    * Retention-eligible tables. `threads`, `messages`, and `resources` all anchor
@@ -2308,8 +2309,26 @@ export class MemoryPG extends MemoryStorage {
         paramIndex++;
       }
 
+      if (options?.groupId !== undefined) {
+        conditions.push(`(strpos("activeObservations", $${paramIndex}) > 0 OR EXISTS (
+          SELECT 1 FROM jsonb_array_elements("bufferedObservationChunks") AS chunk
+          WHERE strpos(chunk->>'observations', $${paramIndex}) > 0
+        ))`);
+        paramIndex++;
+        params.push(`<observation-group id="${options.groupId}"`);
+      }
+      if (options?.beforeGeneration !== undefined) {
+        conditions.push(`"generationCount" < $${paramIndex++}`);
+        params.push(options.beforeGeneration);
+      }
+      if (options?.afterGeneration !== undefined) {
+        conditions.push(`"generationCount" > $${paramIndex++}`);
+        params.push(options.afterGeneration);
+      }
+      const order =
+        options?.sortDirection === 'ASC' ? `"generationCount" ASC, "createdAt" ASC, id ASC` : OM_GENERATION_ORDER;
       params.push(limit);
-      let sql = `SELECT * FROM ${tableName} WHERE ${conditions.join(' AND ')} ORDER BY ${OM_GENERATION_ORDER} LIMIT $${paramIndex}`;
+      let sql = `SELECT * FROM ${tableName} WHERE ${conditions.join(' AND ')} ORDER BY ${order} LIMIT $${paramIndex}`;
       paramIndex++;
 
       if (options?.offset != null) {

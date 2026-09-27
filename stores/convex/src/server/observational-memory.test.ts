@@ -98,6 +98,7 @@ function createFakeOMDb(initialDocs: Array<Record<string, any>>) {
           return chain;
         },
         first: async () => ordered()[0] ?? null,
+        collect: async () => ordered(),
         take: async (n: number) => ordered().slice(0, n),
         unique: async () => {
           if (filtered.length > 1) throw new Error('unique() matched more than one document');
@@ -273,6 +274,57 @@ describe('handleObservationalMemoryOperation', () => {
       offset: 1,
     });
     expect((filtered as any).result.map((doc: any) => doc.id)).toEqual(['om-gen1']);
+  });
+
+  it('omGetHistory finds literal group ids before ordering and limiting, including old records', async () => {
+    const groupId = 'literal_%.$group';
+    const group = `<observation-group id="${groupId}" range="m1:m2">body</observation-group>`;
+    const { ctx } = createFakeOMDb([
+      storedOMDoc({ id: 'other', lookupKey: 'resource:other', activeObservations: group }),
+      storedOMDoc({ id: 'mention', activeObservations: groupId }),
+      storedOMDoc({ id: 'first', generationCount: 1, activeObservations: group }),
+      storedOMDoc({ id: 'carry', generationCount: 2, activeObservations: group }),
+      ...Array.from({ length: 1001 }, (_, i) => storedOMDoc({ id: `later-${i}`, generationCount: i + 3 })),
+    ]);
+    const request = {
+      op: 'omGetHistory' as const,
+      tableName: OM_TABLE,
+      lookupKey: 'resource:res-1',
+      groupId,
+      limit: 1,
+      sortDirection: 'ASC' as const,
+    };
+    const first = await handleObservationalMemoryOperation(ctx, OM_TABLE, request);
+    expect((first as any).result.map((doc: any) => doc.id)).toEqual(['first']);
+    const next = await handleObservationalMemoryOperation(ctx, OM_TABLE, {
+      ...request,
+      afterGeneration: 1,
+      beforeGeneration: 3,
+    });
+    expect((next as any).result.map((doc: any) => doc.id)).toEqual(['carry']);
+    const offset = await handleObservationalMemoryOperation(ctx, OM_TABLE, { ...request, offset: 1 });
+    expect((offset as any).result.map((doc: any) => doc.id)).toEqual(['carry']);
+  });
+
+  it('omGetHistory matches buffered originals on older generations without changing stored chunks', async () => {
+    const groupId = 'buffered_%.$group';
+    const bufferedObservationChunks = JSON.stringify([
+      { observations: `<observation-group id="${groupId}" range="a:b">body</observation-group>` },
+    ]);
+    const { ctx } = createFakeOMDb([
+      storedOMDoc({ id: 'buffered', generationCount: 0, bufferedObservationChunks }),
+      storedOMDoc({ id: 'newer', generationCount: 1 }),
+    ]);
+    const result = await handleObservationalMemoryOperation(ctx, OM_TABLE, {
+      op: 'omGetHistory',
+      tableName: OM_TABLE,
+      lookupKey: 'resource:res-1',
+      groupId,
+      limit: 1,
+      sortDirection: 'ASC',
+    });
+    expect((result as any).result.map((doc: any) => doc.id)).toEqual(['buffered']);
+    expect((result as any).result[0].bufferedObservationChunks).toBe(bufferedObservationChunks);
   });
 
   it('omUpdateActive increments totalTokensObserved and resets pendingMessageTokens', async () => {
