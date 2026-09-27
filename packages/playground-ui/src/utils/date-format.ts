@@ -1,5 +1,12 @@
 export type DateInput = Date | string | number | null | undefined;
-export type DatePreset = 'date' | 'date-time' | 'date-time-seconds' | 'time' | 'time-seconds' | 'relative-time';
+export type DatePreset =
+  | 'date'
+  | 'date-time'
+  | 'date-time-seconds'
+  | 'time'
+  | 'time-seconds'
+  | 'relative-time'
+  | 'relative-long';
 
 type FormatOptions = { locale?: string; now?: Date | number; timeZone?: string };
 
@@ -69,6 +76,27 @@ export function formatShortDate(value: DateInput, { locale, now, timeZone }: For
   return getFormatter(key, locale, timeZone).format(date);
 }
 
+const LONG_RELATIVE_UNITS: Array<[Intl.RelativeTimeFormatUnit, number]> = [
+  ['year', 365 * 86_400],
+  ['month', 30 * 86_400],
+  ['week', 7 * 86_400],
+  ['day', 86_400],
+  ['hour', 3_600],
+  ['minute', 60],
+];
+
+const relativeFormatters = new Map<string, Intl.RelativeTimeFormat>();
+
+function getRelativeFormatter(locale?: string) {
+  const key = locale ?? '';
+  let formatter = relativeFormatters.get(key);
+  if (!formatter) {
+    formatter = new Intl.RelativeTimeFormat(locale, { numeric: 'auto' });
+    relativeFormatters.set(key, formatter);
+  }
+  return formatter;
+}
+
 /**
  * Uses the browser locale unless `locale` is given.
  * - `date`: date only; omits the year when it matches `now` in the requested timezone
@@ -97,6 +125,11 @@ export function formatDate(value: DateInput, preset: DatePreset, options: Format
     if (!match) return formatDate(date, 'date', options);
     const label = `${Math.floor(abs / match.size)}${match.unit}`;
     return diff < 0 ? `${label} ago` : `in ${label}`;
+  }
+  if (preset === 'relative-long') {
+    const seconds = (date.getTime() - new Date(now ?? Date.now()).getTime()) / 1000;
+    const [unit, size] = LONG_RELATIVE_UNITS.find(([, size]) => Math.abs(seconds) >= size) ?? ['second', 1];
+    return getRelativeFormatter(locale).format(Math.round(seconds / size), unit);
   }
   if (preset === 'date') return formatShortDate(date, options);
 
