@@ -5,6 +5,7 @@ import type { DataListSticky } from './shared';
 import { Checkbox } from '@/ds/components/Checkbox';
 import { cn } from '@/lib/utils';
 import { formatDate, formatTimestampPrecise } from '@/utils/date-format';
+import { getShortId } from '@/utils/id';
 
 export type DataListCellProps = {
   children?: ReactNode;
@@ -178,10 +179,6 @@ export function DataListNumberCell({
       {children}
     </DataListCell>
   );
-}
-
-function getShortId(id: string | undefined): string {
-  return id?.slice(0, 8) ?? '';
 }
 
 export interface DataListIdCellProps {
