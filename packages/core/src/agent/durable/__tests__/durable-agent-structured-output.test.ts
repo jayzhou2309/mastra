@@ -11,8 +11,12 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { z } from 'zod';
 import { z as z3 } from 'zod/v3';
 import { EventEmitterPubSub } from '../../../events/event-emitter';
+import { Mastra } from '../../../mastra';
+import { MockMemory } from '../../../memory/mock';
+import { InMemoryStore } from '../../../storage';
 import { Agent } from '../../agent';
 import { createDurableAgent } from '../create-durable-agent';
+import { createEventedAgent } from '../create-evented-agent';
 import { durableOptionsSchema } from '../workflows/shared/schemas';
 
 // ============================================================================
@@ -23,6 +27,10 @@ import { durableOptionsSchema } from '../workflows/shared/schemas';
  * Creates a mock model that returns structured JSON output
  */
 function createStructuredOutputModel(jsonOutput: object) {
+  return createTextOutputModel(JSON.stringify(jsonOutput));
+}
+
+function createTextOutputModel(text: string) {
   return new MockLanguageModelV2({
     doGenerate: async () => ({
       rawCall: { rawPrompt: null, rawSettings: {} },
@@ -31,7 +39,7 @@ function createStructuredOutputModel(jsonOutput: object) {
       content: [
         {
           type: 'text',
-          text: JSON.stringify(jsonOutput),
+          text: text,
         },
       ],
       warnings: [],
@@ -41,7 +49,7 @@ function createStructuredOutputModel(jsonOutput: object) {
         { type: 'stream-start', warnings: [] },
         { type: 'response-metadata', id: 'id-0', modelId: 'mock-model-id', timestamp: new Date(0) },
         { type: 'text-start', id: 'text-1' },
-        { type: 'text-delta', id: 'text-1', delta: JSON.stringify(jsonOutput) },
+        { type: 'text-delta', id: 'text-1', delta: text },
         { type: 'text-end', id: 'text-1' },
         {
           type: 'finish',
@@ -800,5 +808,68 @@ describe('DurableAgent compact structuredOutput.instructions (issue #23798)', ()
     );
     expect(promptJson).toContain(SYSTEM_SCHEMA_PREFIX);
     expect(promptJson).toContain(SENTINEL);
+  });
+});
+
+describe('DurableAgent structuredOutput metadata on saved messages (issue #26432)', () => {
+  let pubsub: EventEmitterPubSub;
+
+  beforeEach(() => {
+    pubsub = new EventEmitterPubSub();
+  });
+
+  afterEach(async () => {
+    await pubsub.close();
+  });
+
+  const personSchema = z.object({ name: z.string(), age: z.number() });
+
+  async function runAndRecall(engine: 'durable' | 'evented', responseText: string) {
+    const memory = new MockMemory({ storage: new InMemoryStore() });
+    const agentId = `${engine}-structured-output-memory-${responseText.length}`;
+    const agent = new Agent({
+      id: agentId,
+      name: agentId,
+      instructions: 'Extract the person.',
+      model: createTextOutputModel(responseText) as LanguageModelV2,
+      memory,
+    });
+    const wrapped =
+      engine === 'durable' ? createDurableAgent({ agent, pubsub }) : createEventedAgent({ agent, pubsub });
+    if (engine === 'evented') {
+      void new Mastra({ agents: { [agentId]: wrapped as any }, logger: false, storage: new InMemoryStore() });
+    }
+
+    const threadId = `thread-${agentId}`;
+    const { output, cleanup } = await wrapped.stream('Alice is 30.', {
+      structuredOutput: { schema: personSchema, errorStrategy: 'warn' },
+      memory: { thread: threadId, resource: 'u' },
+    });
+    for await (const _chunk of output.fullStream as AsyncIterable<unknown>) {
+    }
+    const object = await output.object;
+    cleanup();
+
+    const { messages } = await memory.recall({ threadId, resourceId: 'u' });
+    return { object, messages };
+  }
+
+  it.each(['durable', 'evented'] as const)(
+    '%s agent saves the parsed object on the assistant message',
+    async engine => {
+      const { object, messages } = await runAndRecall(engine, '{"name":"Alice","age":30}');
+
+      expect(object).toEqual({ name: 'Alice', age: 30 });
+      expect(messages.map(message => message.role)).toEqual(['user', 'assistant']);
+      expect(messages[1]?.content.metadata?.structuredOutput).toEqual({ name: 'Alice', age: 30 });
+    },
+  );
+
+  it('durable agent does not save structuredOutput when the response fails the schema', async () => {
+    const { messages } = await runAndRecall('durable', '{"name":"Alice","age":"thirty"}');
+
+    expect(messages.map(message => message.role)).toEqual(['user', 'assistant']);
+    expect(JSON.stringify(messages[1]?.content.parts)).toContain('thirty');
+    expect(messages[1]?.content.metadata?.structuredOutput).toBeUndefined();
   });
 });
